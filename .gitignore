@@ -10,6 +10,7 @@ npm-debug.log*
 .vscode/
 .idea/
 coverage/
+*.tsbuildinfo
 *.sqlite
 *.sqlite-journal
 *.db
