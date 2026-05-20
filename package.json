@@ -1,0 +1,26 @@
+{
+  "name": "bmag-itam",
+  "private": true,
+  "version": "1.0.0",
+  "description": "BMAG ITAM - IT Asset Management web application",
+  "workspaces": [
+    "client",
+    "server"
+  ],
+  "scripts": {
+    "dev": "concurrently -n server,client -c blue,green \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:server": "npm --workspace server run dev",
+    "dev:client": "npm --workspace client run dev",
+    "build": "npm --workspace client run build && npm --workspace server run build",
+    "start": "npm --workspace server run start",
+    "seed": "npm --workspace server run seed",
+    "reset-db": "npm --workspace server run reset-db",
+    "install:all": "npm install"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
