@@ -39,7 +39,16 @@ export function Assets() {
   const { data: statuses } = useQuery({ queryKey: ['statuses'], queryFn: () => api.get<{ data: string[] }>('/lookups/statuses') });
 
   const columns: Column<any>[] = [
-    { key: 'asset_tag', header: 'Tag', width: '110px', render: (r) => <span className="font-mono text-xs">{r.asset_tag}</span> },
+    {
+      key: 'asset_tag', header: 'Asset tag', width: '140px',
+      render: (r) => <span className="font-mono text-xs font-medium">{r.asset_tag}</span>,
+    },
+    {
+      key: 'serial_number', header: 'Serial #', width: '150px',
+      render: (r) => r.serial_number
+        ? <span className="font-mono text-xs text-muted-foreground">{r.serial_number}</span>
+        : <span className="text-muted-foreground">—</span>,
+    },
     {
       key: 'model', header: 'Asset',
       render: (r) => (
