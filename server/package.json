@@ -12,7 +12,7 @@
     "reset-db": "node src/reset.js"
   },
   "dependencies": {
-    "better-sqlite3": "^11.5.0",
+    "better-sqlite3": "^12.4.0",
     "cors": "^2.8.5",
     "csv-parse": "^5.5.6",
     "csv-stringify": "^6.5.2",
