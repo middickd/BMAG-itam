@@ -1,0 +1,28 @@
+{
+  "projectId": "942ddfb8-b8b6-41d1-8738-7b6677a49b03",
+  "shape": "package",
+  "pkg": "@bmag-itam/client",
+  "globalName": "BMAGUI",
+  "entry": ".design-sync/entry.tsx",
+  "srcDir": "client/src",
+  "tsconfig": "client/tsconfig.json",
+  "cssEntry": "client/dist/assets/index-DxA-oGcZ.css",
+  "readmeHeader": ".design-sync/conventions.md",
+  "componentSrcMap": {
+    "Button": "client/src/components/ui/button.tsx",
+    "Badge": "client/src/components/ui/badge.tsx",
+    "Card": "client/src/components/ui/card.tsx",
+    "Dialog": "client/src/components/ui/dialog.tsx",
+    "Input": "client/src/components/ui/input.tsx",
+    "Label": "client/src/components/ui/label.tsx",
+    "Select": "client/src/components/ui/select.tsx",
+    "Tabs": "client/src/components/ui/tabs.tsx",
+    "StatusBadge": "client/src/components/StatusBadge.tsx",
+    "PageHeader": "client/src/components/PageHeader.tsx",
+    "Avatar": "client/src/components/Avatar.tsx"
+  },
+  "overrides": {
+    "Dialog": { "cardMode": "single", "viewport": "720x460" },
+    "PageHeader": { "cardMode": "column" }
+  }
+}
