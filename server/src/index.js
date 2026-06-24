@@ -22,6 +22,7 @@ import { integrationsRouter } from './routes/integrations.js';
 import { dellRouter } from './routes/dell.js';
 import { requireAuth, enforceWriteRole } from './auth.js';
 import { bootAutoSync } from './sync-runner.js';
+import { runMigrations } from './migrate.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -67,7 +68,18 @@ app.use((err, _req, res, _next) => {
 });
 
 const port = process.env.PORT || 4000;
-app.listen(port, () => {
-  console.log(`[itam] api listening on http://localhost:${port}`);
-  bootAutoSync();
-});
+
+// Apply any pending schema migrations before accepting traffic. If a migration
+// fails the process exits non-zero — the deploy health check then rolls back to
+// the previous release rather than serving against a half-migrated database.
+runMigrations()
+  .then(() => {
+    app.listen(port, () => {
+      console.log(`[itam] api listening on http://localhost:${port}`);
+      bootAutoSync();
+    });
+  })
+  .catch((err) => {
+    console.error('[itam] migration failed on startup — not starting server', err);
+    process.exit(1);
+  });
