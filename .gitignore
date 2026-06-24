@@ -4,6 +4,9 @@ build/
 .env
 .env.local
 .env.*.local
+# Docker runtime secrets (config/app.env) — keep the .example template tracked
+config/*.env
+!config/*.env.example
 *.log
 npm-debug.log*
 .DS_Store

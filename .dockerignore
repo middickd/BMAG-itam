@@ -1,0 +1,31 @@
+# Dependencies — reinstalled cleanly inside the build (also dodges the workstation npm bug)
+node_modules
+**/node_modules
+
+# Build output — the image rebuilds the client
+client/dist
+dist
+build
+*.tsbuildinfo
+
+# Local runtime data — NEVER ship the dev SQLite DB / CSV artifacts into the image
+server/data
+
+# Secrets — passed at runtime via env_file, never baked into the image
+.env
+**/.env
+config
+
+# VCS / tooling / docs (not needed at build or runtime)
+.git
+.gitignore
+.gitattributes
+.github
+*.md
+.vscode
+.idea
+.claude
+.design-sync
+.ds-sync
+ds-bundle
+*.log

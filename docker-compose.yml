@@ -1,0 +1,42 @@
+# BMAG-itam — single-service stack (Node app serving API + SPA).
+#
+# TLS is intentionally NOT handled here yet: the app publishes only on loopback,
+# so put a TLS-terminating reverse proxy in front of it (your existing IIS on the
+# host, or a Caddy/nginx container). See DOCKER.md for both options. The app sets
+# Secure cookies in production, so it must be reached over HTTPS.
+#
+#   1. cp config/app.env.example config/app.env   # then fill in secrets
+#   2. docker compose up -d --build
+#   3. point your reverse proxy at https://itam.bobmoore.com -> 127.0.0.1:4000
+
+services:
+  app:
+    build:
+      context: .
+      args:
+        VITE_AUTH_MODE: sso
+    image: bmag-itam:latest
+    container_name: bmag-itam
+    restart: unless-stopped
+    env_file:
+      - ./config/app.env
+    environment:
+      NODE_ENV: production
+      PORT: "4000"
+      DB_PATH: /data/itam.db
+    volumes:
+      - itam-data:/data
+    # Loopback-only: reachable by a host-level reverse proxy, not the LAN.
+    # A proxy running as another container reaches the app as `app:4000` over the
+    # compose network instead — drop this `ports` block if you go that route.
+    ports:
+      - "127.0.0.1:4000:4000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  itam-data:
