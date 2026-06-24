@@ -1,36 +1,26 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Shield, Loader2 } from 'lucide-react';
-import { api, getToken, setSession } from '@/lib/api';
+import { fetchMe } from '@/lib/api';
 import { Button } from '@/components/ui/button';
-
-type Provider = { id: string; name: string; color: string };
 
 export function Login() {
   const navigate = useNavigate();
-  const [providers, setProviders] = useState<Provider[]>([]);
-  const [loading, setLoading] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (getToken()) {
-      navigate('/');
-      return;
-    }
-    api.get<{ providers: Provider[] }>('/auth/providers').then((d) => setProviders(d.providers));
+    const params = new URLSearchParams(window.location.search);
+    const err = params.get('error');
+    if (err) setError(err);
+    // Already signed in? (also covers bypass dev mode, where the server returns a dev admin.)
+    fetchMe().then(() => navigate('/')).catch(() => { /* stay on login */ });
   }, [navigate]);
 
-  const signIn = async (providerId: string) => {
-    setLoading(providerId);
-    try {
-      await new Promise((r) => setTimeout(r, 500));
-      const data = await api.post<{ token: string; user: any }>(`/auth/sso/${providerId}`);
-      setSession(data.token, data.user);
-      navigate('/');
-    } catch (e: any) {
-      alert(e.message);
-    } finally {
-      setLoading(null);
-    }
+  const signIn = () => {
+    setLoading(true);
+    // Full navigation: the server 302-redirects to Entra's authorize endpoint.
+    window.location.href = '/api/auth/login?returnTo=/';
   };
 
   return (
@@ -73,34 +63,34 @@ export function Login() {
             <Shield className="h-4 w-4" /> Single sign-on
           </div>
           <h2 className="text-2xl font-semibold tracking-tight mb-1">Sign in to BMAG ITAM</h2>
-          <p className="text-sm text-muted-foreground mb-8">Continue with your enterprise identity provider.</p>
-          <div className="space-y-2">
-            {providers.map((p) => (
-              <Button
-                key={p.id}
-                variant="outline"
-                size="lg"
-                className="w-full justify-start gap-3 h-12"
-                disabled={!!loading}
-                onClick={() => signIn(p.id)}
+          <p className="text-sm text-muted-foreground mb-8">Continue with your Bob Moore work account.</p>
+          {error && (
+            <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300">
+              {error}
+            </div>
+          )}
+          <Button
+            variant="outline"
+            size="lg"
+            className="w-full justify-start gap-3 h-12"
+            disabled={loading}
+            onClick={signIn}
+          >
+            {loading ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <span
+                className="w-5 h-5 rounded-sm flex items-center justify-center text-white text-[10px] font-bold"
+                style={{ backgroundColor: '#0078D4' }}
               >
-                {loading === p.id ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <span
-                    className="w-5 h-5 rounded-sm flex items-center justify-center text-white text-[10px] font-bold"
-                    style={{ backgroundColor: p.color }}
-                  >
-                    {p.name[0]}
-                  </span>
-                )}
-                <span>Continue with {p.name}</span>
-              </Button>
-            ))}
-          </div>
+                M
+              </span>
+            )}
+            <span>Continue with Microsoft</span>
+          </Button>
           <p className="text-xs text-muted-foreground mt-8">
-            This is a mock SSO/SAML flow for demonstration. In production, the button would
-            redirect to your IdP&apos;s authorization endpoint and consume the SAMLResponse on return.
+            You&apos;ll be redirected to Microsoft Entra ID to authenticate with your
+            Bob Moore credentials, then returned here.
           </p>
         </div>
       </div>

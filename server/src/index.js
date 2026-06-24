@@ -17,6 +17,11 @@ import { exportsRouter } from './routes/exports.js';
 import { webhooksRouter } from './routes/webhooks.js';
 import { lookupsRouter } from './routes/lookups.js';
 import { activityRouter } from './routes/activity.js';
+import { searchRouter } from './routes/search.js';
+import { integrationsRouter } from './routes/integrations.js';
+import { dellRouter } from './routes/dell.js';
+import { requireAuth, enforceWriteRole } from './auth.js';
+import { bootAutoSync } from './sync-runner.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -31,6 +36,10 @@ app.get('/api/health', (_req, res) => {
 });
 
 app.use('/api/auth', authRouter);
+
+// Everything below requires a valid session; non-admins are blocked from any write.
+app.use('/api', requireAuth, enforceWriteRole);
+
 app.use('/api/assets', assetsRouter);
 app.use('/api/users', usersRouter);
 app.use('/api/licenses', licensesRouter);
@@ -41,6 +50,9 @@ app.use('/api/exports', exportsRouter);
 app.use('/api/webhooks', webhooksRouter);
 app.use('/api/lookups', lookupsRouter);
 app.use('/api/activity', activityRouter);
+app.use('/api/search', searchRouter);
+app.use('/api/integrations', integrationsRouter);
+app.use('/api/dell', dellRouter);
 
 // Serve client in production
 const clientDist = path.resolve(__dirname, '..', '..', 'client', 'dist');
@@ -57,4 +69,5 @@ app.use((err, _req, res, _next) => {
 const port = process.env.PORT || 4000;
 app.listen(port, () => {
   console.log(`[itam] api listening on http://localhost:${port}`);
+  bootAutoSync();
 });

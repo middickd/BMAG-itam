@@ -1,7 +1,7 @@
-import { useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useEffect, useMemo, useState } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Plus, Download, Upload, Filter, Search } from 'lucide-react';
+import { Plus, Download, Upload, Filter, Search, UserPlus, Undo2, PackageX, Trash2, X } from 'lucide-react';
 import { api } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -14,14 +14,31 @@ import { StatusBadge } from '@/components/StatusBadge';
 import { Avatar } from '@/components/Avatar';
 import { formatCurrency, formatDate, daysUntil } from '@/lib/utils';
 import { Badge } from '@/components/ui/badge';
+import { toast, fromError } from '@/lib/toast';
 
 export function Assets() {
   const navigate = useNavigate();
+  const qc = useQueryClient();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [filters, setFilters] = useState<{ q: string; status: string; category: string }>({
-    q: '', status: 'all', category: 'all',
+    q: searchParams.get('q') || '',
+    status: searchParams.get('status') || 'all',
+    category: searchParams.get('category') || 'all',
   });
+
+  // Keep the URL in sync with the filter state so links from the dashboard land correctly
+  // and the back button restores prior filter selections.
+  useEffect(() => {
+    const next = new URLSearchParams();
+    if (filters.q) next.set('q', filters.q);
+    if (filters.status !== 'all') next.set('status', filters.status);
+    if (filters.category !== 'all') next.set('category', filters.category);
+    setSearchParams(next, { replace: true });
+  }, [filters.q, filters.status, filters.category, setSearchParams]);
   const [createOpen, setCreateOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [bulkAssignOpen, setBulkAssignOpen] = useState(false);
 
   const queryParams = useMemo(() => {
     const p = new URLSearchParams();
@@ -37,6 +54,25 @@ export function Assets() {
   });
   const { data: cats } = useQuery({ queryKey: ['cats'], queryFn: () => api.get<{ data: string[] }>('/lookups/categories') });
   const { data: statuses } = useQuery({ queryKey: ['statuses'], queryFn: () => api.get<{ data: string[] }>('/lookups/statuses') });
+
+  const bulk = useMutation({
+    mutationFn: (body: { action: string; user_id?: string }) =>
+      api.post('/assets/bulk', { ids: Array.from(selected), ...body }),
+    onSuccess: (r: any, vars) => {
+      qc.invalidateQueries({ queryKey: ['assets'] });
+      setSelected(new Set());
+      const verbs: Record<string, string> = {
+        assign: 'assigned', checkin: 'checked in', retire: 'retired', delete: 'deleted',
+      };
+      const notes: string[] = [];
+      if (r.failed?.length) notes.push(`${r.failed.length} failed in Freshservice (left unchanged)`);
+      if (r.skipped?.length) notes.push(`${r.skipped.length} skipped (retired)`);
+      const msg = `${r.affected} ${r.affected === 1 ? 'asset' : 'assets'} ${verbs[vars.action]}`;
+      if (r.failed?.length) toast.error(msg, notes.join(' · '));
+      else toast.success(msg, notes.join(' · ') || undefined);
+    },
+    onError: (e) => fromError(e, 'Bulk action failed'),
+  });
 
   const columns: Column<any>[] = [
     {
@@ -135,15 +171,96 @@ export function Assets() {
         </Select>
       </div>
 
+      {selected.size > 0 && (
+        <div className="mb-3 flex items-center justify-between rounded-lg border bg-primary/5 px-3 py-2">
+          <div className="text-sm font-medium">
+            {selected.size} selected
+          </div>
+          <div className="flex items-center gap-2">
+            <Button size="sm" variant="outline" onClick={() => setBulkAssignOpen(true)} disabled={bulk.isPending}>
+              <UserPlus className="h-4 w-4" /> Assign
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => bulk.mutate({ action: 'checkin' })} disabled={bulk.isPending}>
+              <Undo2 className="h-4 w-4" /> Check in
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => bulk.mutate({ action: 'retire' })} disabled={bulk.isPending}>
+              <PackageX className="h-4 w-4" /> Retire
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => confirm(`Delete ${selected.size} assets?`) && bulk.mutate({ action: 'delete' })}
+              disabled={bulk.isPending}
+              className="text-destructive hover:text-destructive"
+            >
+              <Trash2 className="h-4 w-4" /> Delete
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setSelected(new Set())}>
+              <X className="h-4 w-4" />
+            </Button>
+          </div>
+        </div>
+      )}
+
       <DataTable
         columns={columns}
         data={assetsData?.data || []}
         onRowClick={(r) => navigate(`/assets/${r.id}`)}
+        selectable
+        selected={selected}
+        onSelectionChange={setSelected}
       />
 
       <CreateAssetDialog open={createOpen} onOpenChange={setCreateOpen} />
       <ImportDialog open={importOpen} onOpenChange={setImportOpen} />
+      <BulkAssignDialog
+        open={bulkAssignOpen}
+        onOpenChange={setBulkAssignOpen}
+        onAssign={(user_id) => bulk.mutate({ action: 'assign', user_id })}
+        count={selected.size}
+        pending={bulk.isPending}
+      />
     </div>
+  );
+}
+
+function BulkAssignDialog({
+  open, onOpenChange, onAssign, count, pending,
+}: {
+  open: boolean; onOpenChange: (o: boolean) => void;
+  onAssign: (user_id: string) => void; count: number; pending: boolean;
+}) {
+  const [userId, setUserId] = useState('');
+  const { data: users } = useQuery({
+    queryKey: ['users-all'],
+    queryFn: () => api.get<{ data: any[] }>('/users'),
+    enabled: open,
+  });
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Bulk assign {count} assets</DialogTitle>
+          <DialogDescription>All selected assets will be checked out to this user.</DialogDescription>
+        </DialogHeader>
+        <Label className="text-xs text-muted-foreground">User</Label>
+        <Select value={userId} onValueChange={setUserId}>
+          <SelectTrigger><SelectValue placeholder="Select user…" /></SelectTrigger>
+          <SelectContent>
+            {users?.data.map((u) => <SelectItem key={u.id} value={u.id}>{u.name} · {u.department}</SelectItem>)}
+          </SelectContent>
+        </Select>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
+          <Button
+            onClick={() => { onAssign(userId); onOpenChange(false); setUserId(''); }}
+            disabled={!userId || pending}
+          >
+            {pending ? 'Assigning…' : `Assign ${count}`}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -153,20 +270,43 @@ function CreateAssetDialog({ open, onOpenChange }: { open: boolean; onOpenChange
     asset_tag: '', category: 'Laptop', model: '', manufacturer: '', serial_number: '',
     purchase_cost: '', purchase_date: '',
   });
+  const { data: fsStatus } = useQuery({
+    queryKey: ['integrations', 'freshservice'],
+    queryFn: () => api.get<{ configured: boolean }>('/integrations/freshservice'),
+    enabled: open,
+  });
+  const fsConnected = !!fsStatus?.configured;
+
   const create = useMutation({
-    mutationFn: () => api.post('/assets', { ...form, purchase_cost: form.purchase_cost ? Number(form.purchase_cost) : null }),
-    onSuccess: () => {
+    mutationFn: () => api.post<any>('/assets', { ...form, purchase_cost: form.purchase_cost ? Number(form.purchase_cost) : null }),
+    onSuccess: (r) => {
       qc.invalidateQueries({ queryKey: ['assets'] });
       onOpenChange(false);
       setForm({ asset_tag: '', category: 'Laptop', model: '', manufacturer: '', serial_number: '', purchase_cost: '', purchase_date: '' });
+      const fsr = r?.freshservice;
+      if (fsr) {
+        const notes: string[] = [];
+        if (!fsr.typeMatched) notes.push(`mapped to FS type "${fsr.usedTypeName}"`);
+        if (fsr.product?.action === 'created') notes.push(`new product "${fsr.product.name}" created`);
+        else if (fsr.product?.action === 'linked') notes.push(`linked to product "${fsr.product.name}"`);
+        if (fsr.warnings?.length) notes.push(...fsr.warnings);
+        toast.success('Asset created in Freshservice', notes.length ? notes.join('; ') : undefined);
+      } else {
+        toast.success('Asset created', 'Saved locally — Freshservice is not connected');
+      }
     },
+    onError: (e) => fromError(e, 'Could not create asset'),
   });
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Add new asset</DialogTitle>
-          <DialogDescription>Create a new hardware record.</DialogDescription>
+          <DialogDescription>
+            {fsConnected
+              ? 'Creates the record in Freshservice (system of record), then mirrors it here.'
+              : 'Create a new hardware record. Freshservice is not connected, so this is saved locally only.'}
+          </DialogDescription>
         </DialogHeader>
         <div className="grid grid-cols-2 gap-3">
           <Field label="Asset tag"><Input value={form.asset_tag} onChange={(e) => setForm({ ...form, asset_tag: e.target.value })} placeholder="BMAG-01200" /></Field>
@@ -215,7 +355,9 @@ function ImportDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o:
     onSuccess: (r) => {
       setResult(r);
       qc.invalidateQueries({ queryKey: ['assets'] });
+      toast.success(`Imported ${r.inserted} assets`, r.errors?.length ? `${r.errors.length} rows skipped` : undefined);
     },
+    onError: (e) => fromError(e, 'Upload failed'),
   });
   return (
     <Dialog open={open} onOpenChange={(o) => { onOpenChange(o); if (!o) { setFile(null); setResult(null); } }}>

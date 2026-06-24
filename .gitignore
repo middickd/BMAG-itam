@@ -14,8 +14,13 @@ coverage/
 *.sqlite
 *.sqlite-journal
 *.db
+*.db-shm
+*.db-wal
+*.db-journal
 server/data/*.db
 server/data/*.sqlite
+# Runtime/working data artifacts (CSV exports, bulk-restate dry-run/apply logs, test imports)
+server/data/*.csv
 !server/data/.gitkeep
 
 # design-sync (claude.ai/design) — staged scripts, build output, machine state

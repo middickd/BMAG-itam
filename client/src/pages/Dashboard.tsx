@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
-import { Link } from 'react-router-dom';
-import { Laptop, Users, KeyRound, Wrench, TrendingDown, DollarSign, AlertTriangle, Activity } from 'lucide-react';
+import { Link, useNavigate } from 'react-router-dom';
+import { Laptop, Users, KeyRound, Wrench, Boxes, AlertTriangle, Activity } from 'lucide-react';
 import {
   PieChart, Pie, Cell, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid,
 } from 'recharts';
@@ -14,6 +14,7 @@ const CATEGORY_COLORS = ['#3b82f6', '#22c55e', '#f59e0b', '#ec4899', '#8b5cf6', 
 
 const STATUS_LABELS: Record<string, string> = {
   in_stock: 'In stock',
+  reserved: 'Reserved',
   deployed: 'Deployed',
   maintenance: 'Maintenance',
   retired: 'Retired',
@@ -21,6 +22,7 @@ const STATUS_LABELS: Record<string, string> = {
 };
 
 export function Dashboard() {
+  const navigate = useNavigate();
   const { data, isLoading } = useQuery({
     queryKey: ['dashboard'],
     queryFn: () => api.get('/reports/dashboard'),
@@ -38,27 +40,49 @@ export function Dashboard() {
       <PageHeader title="Dashboard" description="An overview of your IT asset estate." />
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-        <Stat icon={Laptop} label="Total assets" value={data.totals.assets} accent="text-blue-600" />
-        <Stat icon={Users} label="People" value={data.totals.users} accent="text-emerald-600" />
-        <Stat icon={KeyRound} label="License pools" value={data.totals.licenses} accent="text-violet-600" />
-        <Stat icon={Wrench} label="Open tickets" value={data.totals.open_tickets} accent="text-amber-600" />
+        <Stat to="/assets" icon={Laptop} label="Total assets" value={data.totals.assets} accent="text-blue-600" />
+        <Stat to="/users" icon={Users} label="People" value={data.totals.users} accent="text-emerald-600" />
+        <Stat to="/licenses" icon={KeyRound} label="License pools" value={data.totals.licenses} accent="text-violet-600" />
+        <Stat to="/maintenance" icon={Wrench} label="Open tickets" value={data.totals.open_tickets} accent="text-amber-600" />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">
         <Card>
           <CardHeader>
             <CardTitle className="text-base flex items-center gap-2">
-              <DollarSign className="h-4 w-4 text-emerald-600" /> Cost & depreciation
+              <Boxes className="h-4 w-4 text-cyan-600" /> Inventory on hand
             </CardTitle>
           </CardHeader>
-          <CardContent className="space-y-4">
-            <Money label="Total purchase value" value={data.cost.purchase_total} />
-            <Money label="Current book value" value={data.cost.depreciated_total} muted />
-            <Money label="Monthly software spend" value={data.cost.monthly_software} accent="text-violet-600" />
-            <div className="text-xs text-muted-foreground flex items-center gap-1.5 pt-2">
-              <TrendingDown className="h-3 w-3" />
-              {formatCurrency(data.cost.purchase_total - data.cost.depreciated_total)} depreciated to date
-            </div>
+          <CardContent>
+            <Link to="/inventory" className="block group">
+              <div className="flex items-baseline justify-between mb-1">
+                <span className="text-3xl font-semibold tracking-tight group-hover:text-primary transition-colors">
+                  {data.in_stock?.count ?? 0}
+                </span>
+                <span className="text-sm text-muted-foreground">
+                  {formatCurrency(data.in_stock?.value ?? 0)} value
+                </span>
+              </div>
+              <p className="text-xs text-muted-foreground">Devices currently in stock and ready to deploy.</p>
+            </Link>
+
+            <div className="text-xs uppercase tracking-wider text-muted-foreground mt-4 mb-2">By category</div>
+            {(!data.in_stock?.by_category || data.in_stock.by_category.length === 0) ? (
+              <p className="text-sm text-muted-foreground">No stock on hand.</p>
+            ) : (
+              <div className="flex flex-wrap gap-1.5">
+                {data.in_stock.by_category.map((c: { category: string; count: number }) => (
+                  <Link
+                    key={c.category}
+                    to={`/inventory?category=${encodeURIComponent(c.category)}`}
+                    className="group/cat inline-flex items-center rounded-md bg-secondary px-2 py-0.5 text-xs font-medium text-secondary-foreground hover:bg-primary hover:text-primary-foreground transition-colors"
+                  >
+                    {c.category}
+                    <span className="ml-1 text-muted-foreground group-hover/cat:text-primary-foreground/80">{c.count}</span>
+                  </Link>
+                ))}
+              </div>
+            )}
           </CardContent>
         </Card>
 
@@ -68,7 +92,15 @@ export function Dashboard() {
             <div className="h-44">
               <ResponsiveContainer>
                 <PieChart>
-                  <Pie data={statusData} dataKey="count" nameKey="label" innerRadius={42} outerRadius={70}>
+                  <Pie
+                    data={statusData}
+                    dataKey="count"
+                    nameKey="label"
+                    innerRadius={42}
+                    outerRadius={70}
+                    onClick={(d: any) => d?.status && navigate(`/assets?status=${d.status}`)}
+                    cursor="pointer"
+                  >
                     {statusData.map((_: any, i: number) => (
                       <Cell key={i} fill={CATEGORY_COLORS[i % CATEGORY_COLORS.length]} />
                     ))}
@@ -79,10 +111,15 @@ export function Dashboard() {
             </div>
             <div className="flex flex-wrap gap-2 justify-center mt-2">
               {statusData.map((s: any, i: number) => (
-                <div key={s.status} className="flex items-center gap-1.5 text-xs">
+                <button
+                  key={s.status}
+                  type="button"
+                  onClick={() => navigate(`/assets?status=${s.status}`)}
+                  className="flex items-center gap-1.5 text-xs rounded px-1.5 py-0.5 hover:bg-accent transition-colors"
+                >
                   <span className="w-2.5 h-2.5 rounded-sm" style={{ background: CATEGORY_COLORS[i % CATEGORY_COLORS.length] }} />
                   {s.label} <span className="text-muted-foreground">{s.count}</span>
-                </div>
+                </button>
               ))}
             </div>
           </CardContent>
@@ -178,27 +215,24 @@ export function Dashboard() {
   );
 }
 
-function Stat({ icon: Icon, label, value, accent }: any) {
+function Stat({ to, icon: Icon, label, value, accent }: any) {
   return (
-    <Card>
-      <CardContent className="p-5">
-        <div className="flex items-start justify-between">
-          <div>
-            <div className="text-sm text-muted-foreground mb-1">{label}</div>
-            <div className="text-3xl font-semibold tracking-tight">{value}</div>
+    <Link
+      to={to}
+      className="block rounded-lg transition-shadow hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+    >
+      <Card className="hover:border-foreground/20 transition-colors">
+        <CardContent className="p-5">
+          <div className="flex items-start justify-between">
+            <div>
+              <div className="text-sm text-muted-foreground mb-1">{label}</div>
+              <div className="text-3xl font-semibold tracking-tight">{value}</div>
+            </div>
+            <Icon className={`h-5 w-5 ${accent}`} />
           </div>
-          <Icon className={`h-5 w-5 ${accent}`} />
-        </div>
-      </CardContent>
-    </Card>
+        </CardContent>
+      </Card>
+    </Link>
   );
 }
 
-function Money({ label, value, accent, muted }: { label: string; value: number; accent?: string; muted?: boolean }) {
-  return (
-    <div className="flex items-baseline justify-between">
-      <span className={`text-sm ${muted ? 'text-muted-foreground' : ''}`}>{label}</span>
-      <span className={`text-lg font-semibold ${accent || ''}`}>{formatCurrency(value)}</span>
-    </div>
-  );
-}

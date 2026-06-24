@@ -5,6 +5,8 @@ import { Login } from './pages/Login';
 import { Dashboard } from './pages/Dashboard';
 import { Assets } from './pages/Assets';
 import { AssetDetail } from './pages/AssetDetail';
+import { Inventory } from './pages/Inventory';
+import { Loaners } from './pages/Loaners';
 import { Licenses } from './pages/Licenses';
 import { LicenseDetail } from './pages/LicenseDetail';
 import { People } from './pages/People';
@@ -13,30 +15,18 @@ import { Maintenance } from './pages/Maintenance';
 import { Reports } from './pages/Reports';
 import { Integrations } from './pages/Integrations';
 import { Settings } from './pages/Settings';
-import { getCurrentUser, getToken, setSession } from './lib/api';
-
-const AUTH_MODE = (import.meta.env.VITE_AUTH_MODE as string) || 'sso';
+import { fetchMe } from './lib/api';
 
 function RequireAuth({ children }: { children: JSX.Element }) {
   const location = useLocation();
-  const [ready, setReady] = useState(false);
+  const [state, setState] = useState<'loading' | 'authed' | 'anon'>('loading');
   useEffect(() => {
-    if (AUTH_MODE === 'bypass' && !getToken()) {
-      // Auto-login: fetch admin via SSO mock provider
-      fetch('/api/auth/sso/okta', { method: 'POST' })
-        .then((r) => r.json())
-        .then((data) => {
-          setSession(data.token, data.user);
-          setReady(true);
-        });
-    } else {
-      setReady(true);
-    }
+    // The session cookie is the source of truth; confirm it with the server. In bypass
+    // (dev) mode the server returns a dev admin, so this resolves without any SSO round-trip.
+    fetchMe().then(() => setState('authed')).catch(() => setState('anon'));
   }, []);
-  if (!ready) return null;
-  const token = getToken();
-  const user = getCurrentUser();
-  if (!token || !user) {
+  if (state === 'loading') return null;
+  if (state === 'anon') {
     return <Navigate to="/login" state={{ from: location }} replace />;
   }
   return children;
@@ -50,6 +40,8 @@ export default function App() {
         <Route path="/" element={<Dashboard />} />
         <Route path="/assets" element={<Assets />} />
         <Route path="/assets/:id" element={<AssetDetail />} />
+        <Route path="/inventory" element={<Inventory />} />
+        <Route path="/loaners" element={<Loaners />} />
         <Route path="/licenses" element={<Licenses />} />
         <Route path="/licenses/:id" element={<LicenseDetail />} />
         <Route path="/users" element={<People />} />

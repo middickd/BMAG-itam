@@ -1,16 +1,20 @@
-import { NavLink, Outlet, useNavigate } from 'react-router-dom';
+import { NavLink, Outlet } from 'react-router-dom';
 import {
-  LayoutDashboard, Laptop, Users, KeyRound, Wrench, BarChart3, Settings,
-  LogOut, Search, Bell, Webhook,
+  LayoutDashboard, Laptop, Boxes, Handshake, Users, KeyRound, Wrench, BarChart3, Settings,
+  LogOut, Webhook, Sun, Moon, Monitor,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Avatar } from './Avatar';
 import { Button } from './ui/button';
-import { clearSession, getCurrentUser } from '@/lib/api';
+import { GlobalSearch } from './GlobalSearch';
+import { logout as doLogout, getCurrentUser } from '@/lib/api';
+import { useTheme, nextTheme } from '@/lib/theme';
 
 const nav = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard, end: true },
   { to: '/assets', label: 'Assets', icon: Laptop },
+  { to: '/inventory', label: 'Inventory', icon: Boxes },
+  { to: '/loaners', label: 'Loaners', icon: Handshake },
   { to: '/licenses', label: 'Licenses', icon: KeyRound },
   { to: '/users', label: 'People', icon: Users },
   { to: '/maintenance', label: 'Maintenance', icon: Wrench },
@@ -20,13 +24,16 @@ const nav = [
 ];
 
 export function Layout() {
-  const navigate = useNavigate();
   const user = getCurrentUser();
+  const [theme, setTheme] = useTheme();
 
   const logout = () => {
-    clearSession();
-    navigate('/login');
+    // Clears the server session cookie, then redirects (Entra single sign-out when in SSO mode).
+    doLogout();
   };
+
+  const ThemeIcon = theme === 'dark' ? Moon : theme === 'light' ? Sun : Monitor;
+  const themeLabel = `Theme: ${theme}`;
 
   return (
     <div className="flex h-screen bg-muted/30">
@@ -76,13 +83,18 @@ export function Layout() {
         </div>
       </aside>
       <main className="flex-1 flex flex-col overflow-hidden">
-        <header className="h-14 flex items-center justify-between px-6 border-b bg-background">
-          <div className="flex items-center gap-2 text-sm text-muted-foreground">
-            <Search className="h-4 w-4" />
-            <span className="hidden sm:inline">Search assets, people, or licenses…</span>
-          </div>
+        <header className="h-14 flex items-center justify-between px-6 border-b bg-background gap-4">
+          <GlobalSearch />
           <div className="flex items-center gap-2">
-            <Button variant="ghost" size="icon"><Bell className="h-4 w-4" /></Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => setTheme(nextTheme(theme))}
+              title={themeLabel}
+              aria-label={themeLabel}
+            >
+              <ThemeIcon className="h-4 w-4" />
+            </Button>
           </div>
         </header>
         <div className="flex-1 overflow-auto">

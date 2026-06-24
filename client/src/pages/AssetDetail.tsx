@@ -1,9 +1,9 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   ArrowLeft, ChevronRight, MapPin, Calendar, ShieldCheck, DollarSign,
-  UserPlus, Undo2, Wrench, Trash2, PackageX,
+  UserPlus, Undo2, Wrench, Trash2, PackageX, NotebookPen,
 } from 'lucide-react';
 import { api } from '@/lib/api';
 import { Button } from '@/components/ui/button';
@@ -17,6 +17,7 @@ import { StatusBadge } from '@/components/StatusBadge';
 import { Avatar } from '@/components/Avatar';
 import { formatCurrency, formatDate, formatDateTime, daysUntil } from '@/lib/utils';
 import { Badge } from '@/components/ui/badge';
+import { toast, fromError } from '@/lib/toast';
 
 export function AssetDetail() {
   const { id } = useParams();
@@ -24,6 +25,7 @@ export function AssetDetail() {
   const qc = useQueryClient();
   const [assignOpen, setAssignOpen] = useState(false);
   const [maintOpen, setMaintOpen] = useState(false);
+  const [notesOpen, setNotesOpen] = useState(false);
 
   const { data: asset } = useQuery({
     queryKey: ['asset', id],
@@ -33,20 +35,47 @@ export function AssetDetail() {
 
   const checkin = useMutation({
     mutationFn: () => api.post(`/assets/${id}/checkin`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['asset', id] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['asset', id] });
+      toast.success('Checked in');
+    },
+    onError: (e) => fromError(e, 'Check-in failed'),
   });
   const retire = useMutation({
     mutationFn: () => api.post(`/assets/${id}/retire`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['asset', id] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['asset', id] });
+      toast.success('Asset retired');
+    },
+    onError: (e) => fromError(e, 'Retire failed'),
   });
   const remove = useMutation({
     mutationFn: () => api.delete(`/assets/${id}`),
-    onSuccess: () => navigate('/assets'),
+    onSuccess: () => {
+      toast.success('Asset deleted');
+      navigate('/assets');
+    },
+    onError: (e) => fromError(e, 'Delete failed'),
+  });
+  const checkWarranty = useMutation({
+    mutationFn: () => api.post(`/dell/warranty/${id}`),
+    onSuccess: (r: any) => {
+      qc.invalidateQueries({ queryKey: ['asset', id] });
+      toast.success(`Warranty updated to ${r.warranty_expires_at}`,
+        r.fs_warning || 'Synced from Dell');
+    },
+    onError: (e) => fromError(e, 'Warranty lookup failed'),
   });
 
   if (!asset) return <div className="p-6">Loading…</div>;
 
   const warrantyDays = daysUntil(asset.warranty_expires_at);
+  // Match Dell by manufacturer OR model, so blank-manufacturer imports (e.g. a
+  // "Dell Pro"/"Precision" laptop) still get the warranty button. Mirrors the
+  // server's isDellAsset()/DELL_SQL_MATCH in dell-warranty.js — keep in sync.
+  const isDell = /dell|latitude|precision|optiplex|inspiron|vostro|poweredge|wyse|xps/i.test(
+    `${asset.manufacturer || ''} ${asset.model || ''}`
+  );
 
   return (
     <div className="p-6 max-w-[1400px] mx-auto">
@@ -77,6 +106,12 @@ export function AssetDetail() {
               <Button variant="outline" onClick={() => setMaintOpen(true)}><Wrench className="h-4 w-4" /> Maintenance</Button>
               <Button variant="outline" onClick={() => retire.mutate()}><PackageX className="h-4 w-4" /> Retire</Button>
             </>
+          )}
+          <Button variant="outline" onClick={() => setNotesOpen(true)}><NotebookPen className="h-4 w-4" /> Notes</Button>
+          {isDell && (
+            <Button variant="outline" onClick={() => checkWarranty.mutate()} disabled={checkWarranty.isPending}>
+              <ShieldCheck className="h-4 w-4" /> {checkWarranty.isPending ? 'Checking…' : 'Check warranty'}
+            </Button>
           )}
           <Button variant="ghost" size="icon" onClick={() => confirm('Delete this asset?') && remove.mutate()}>
             <Trash2 className="h-4 w-4 text-destructive" />
@@ -205,6 +240,7 @@ export function AssetDetail() {
 
       <AssignDialog open={assignOpen} onOpenChange={setAssignOpen} assetId={asset.id} />
       <MaintenanceDialog open={maintOpen} onOpenChange={setMaintOpen} assetId={asset.id} />
+      <NotesDialog open={notesOpen} onOpenChange={setNotesOpen} assetId={asset.id} initialNotes={asset.notes || ''} fsLinked={!!asset.external_display_id} />
     </div>
   );
 }
@@ -233,7 +269,9 @@ function AssignDialog({ open, onOpenChange, assetId }: any) {
       qc.invalidateQueries({ queryKey: ['asset', assetId] });
       onOpenChange(false);
       setUserId(''); setNote('');
+      toast.success('Asset assigned');
     },
+    onError: (e) => fromError(e, 'Assign failed'),
   });
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -270,6 +308,52 @@ function AssignDialog({ open, onOpenChange, assetId }: any) {
   );
 }
 
+function NotesDialog({ open, onOpenChange, assetId, initialNotes, fsLinked }: any) {
+  const qc = useQueryClient();
+  const [notes, setNotes] = useState(initialNotes);
+  // Refresh the editor with the latest saved notes each time the dialog opens.
+  useEffect(() => { if (open) setNotes(initialNotes); }, [open, initialNotes]);
+  const save = useMutation({
+    mutationFn: () => api.post(`/assets/${assetId}/notes`, { notes }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['asset', assetId] });
+      onOpenChange(false);
+      toast.success('Notes saved', fsLinked ? 'Pushed to Freshservice' : undefined);
+    },
+    onError: (e) => fromError(e, 'Could not save notes'),
+  });
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Edit notes</DialogTitle>
+          <DialogDescription>
+            {fsLinked
+              ? 'Saved to this asset and written back to Freshservice.'
+              : 'Saved to this asset.'}
+          </DialogDescription>
+        </DialogHeader>
+        <div>
+          <Label className="text-xs text-muted-foreground">Notes</Label>
+          <textarea
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            rows={6}
+            placeholder="Add notes about this asset…"
+            className="flex w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+          />
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
+          <Button onClick={() => save.mutate()} disabled={save.isPending || notes === initialNotes}>
+            {save.isPending ? 'Saving…' : 'Save notes'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function MaintenanceDialog({ open, onOpenChange, assetId }: any) {
   const qc = useQueryClient();
   const [form, setForm] = useState({ type: '', description: '', cost: '' });
@@ -285,7 +369,9 @@ function MaintenanceDialog({ open, onOpenChange, assetId }: any) {
       qc.invalidateQueries({ queryKey: ['maintenance'] });
       onOpenChange(false);
       setForm({ type: '', description: '', cost: '' });
+      toast.success('Ticket opened');
     },
+    onError: (e) => fromError(e, 'Could not open ticket'),
   });
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>

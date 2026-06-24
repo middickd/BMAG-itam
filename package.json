@@ -15,6 +15,7 @@
     "start": "npm --workspace server run start",
     "seed": "npm --workspace server run seed",
     "reset-db": "npm --workspace server run reset-db",
+    "sync-fs": "npm --workspace server run sync-fs",
     "install:all": "npm install"
   },
   "devDependencies": {

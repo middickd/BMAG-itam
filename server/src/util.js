@@ -4,9 +4,23 @@ import { db } from './db.js';
 export const id = (prefix = '') => `${prefix}${prefix ? '_' : ''}${nanoid(10)}`;
 
 export function logActivity({ kind, summary, ref_type, ref_id, actor = 'system' }) {
+  const actId = id('act');
   db.prepare(
     `INSERT INTO activity (id, kind, summary, ref_type, ref_id, actor) VALUES (?, ?, ?, ?, ?, ?)`
-  ).run(id('act'), kind, summary, ref_type || null, ref_id || null, actor);
+  ).run(actId, kind, summary, ref_type || null, ref_id || null, actor);
+
+  // Fan out to webhook subscribers. Imported lazily to avoid a circular dep.
+  import('./webhooks.js').then(({ dispatchEvent }) => {
+    dispatchEvent({
+      id: actId,
+      kind,
+      summary,
+      ref_type: ref_type || null,
+      ref_id: ref_id || null,
+      actor,
+      created_at: new Date().toISOString(),
+    });
+  }).catch((e) => console.error('[webhook] dispatch import failed', e));
 }
 
 export function asyncHandler(fn) {

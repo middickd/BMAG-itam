@@ -2,6 +2,7 @@ import { Badge } from '@/components/ui/badge';
 
 const map: Record<string, { variant: any; label: string }> = {
   in_stock: { variant: 'secondary', label: 'In stock' },
+  reserved: { variant: 'default', label: 'Reserved' },
   deployed: { variant: 'success', label: 'Deployed' },
   maintenance: { variant: 'warning', label: 'Maintenance' },
   retired: { variant: 'muted', label: 'Retired' },

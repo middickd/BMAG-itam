@@ -11,6 +11,7 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Label } from '@/components/ui/label';
 import { formatCurrency, formatDate, daysUntil } from '@/lib/utils';
+import { toast, fromError } from '@/lib/toast';
 
 export function LicenseDetail() {
   const { id } = useParams();
@@ -24,7 +25,11 @@ export function LicenseDetail() {
 
   const revoke = useMutation({
     mutationFn: (userId: string) => api.post(`/licenses/${id}/revoke`, { user_id: userId }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['license', id] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['license', id] });
+      toast.success('Seat revoked');
+    },
+    onError: (e) => fromError(e, 'Revoke failed'),
   });
 
   if (!lic) return <div className="p-6">Loading…</div>;
@@ -159,7 +164,9 @@ function AssignSeatDialog({ open, onOpenChange, licenseId }: any) {
       qc.invalidateQueries({ queryKey: ['license', licenseId] });
       onOpenChange(false);
       setUserId('');
+      toast.success('Seat assigned');
     },
+    onError: (e) => fromError(e, 'Assign failed'),
   });
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
