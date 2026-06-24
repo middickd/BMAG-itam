@@ -1,0 +1,9 @@
+# Force LF for files consumed inside Linux containers — CRLF here breaks the
+# Docker build / shell scripts / env parsing regardless of contributor OS settings.
+Dockerfile      text eol=lf
+*.sh            text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+.dockerignore   text eol=lf
+.gitattributes  text eol=lf
+config/*.env*   text eol=lf
