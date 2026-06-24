@@ -46,10 +46,10 @@ Quick local check (bypasses the proxy): `curl http://127.0.0.1:4000/api/health`.
 The app publishes only on `127.0.0.1:4000` and sets **Secure** cookies in
 production, so users must reach it over HTTPS through a reverse proxy. Two options:
 
-### Option A — your existing IIS on the host
+### Option A — IIS on the host (this deployment) ✅
 Reverse-proxy `https://itam.bobmoore.com` → `http://127.0.0.1:4000` (ARR + URL
-Rewrite, terminating TLS with your cert). The container's loopback publish is
-exactly what IIS needs.
+Rewrite, terminating TLS with your public cert). The container's loopback publish
+is exactly what IIS needs. **Full setup + `web.config`: [`deploy/iis/README.md`](deploy/iis/README.md).**
 
 ### Option B — a Caddy container (drop-in)
 Add a proxy service to the stack and remove the app's `ports:` block (the proxy
