@@ -43,7 +43,7 @@ function expandAsset(a) {
 }
 
 assetsRouter.get('/', asyncHandler(async (req, res) => {
-  const { status, category, q, location_id, assigned_to, limit = 200 } = req.query;
+  const { status, category, q, location_id, assigned_to, limit } = req.query;
   let sql = 'SELECT * FROM assets WHERE 1=1';
   const params = [];
   if (status) { sql += ' AND status = ?'; params.push(status); }
@@ -55,8 +55,14 @@ assetsRouter.get('/', asyncHandler(async (req, res) => {
     const like = `%${q}%`;
     params.push(like, like, like, like);
   }
-  sql += ' ORDER BY created_at DESC LIMIT ?';
-  params.push(Number(limit));
+  sql += ' ORDER BY created_at DESC';
+  // Only cap the result set when the caller asks for one. The Assets page relies on
+  // an unbounded list both to render the full fleet and to count it; a silent default
+  // limit truncated the table and made the header report e.g. "200 devices".
+  if (limit != null && limit !== '') {
+    sql += ' LIMIT ?';
+    params.push(Number(limit));
+  }
   const rows = db.prepare(sql).all(...params);
   res.json({ data: rows.map(expandAsset) });
 }));

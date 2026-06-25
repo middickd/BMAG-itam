@@ -3,7 +3,7 @@
 // bootAutoSync() once on startup.
 
 import { db } from './db.js';
-import { runSync } from './sync-freshservice.js';
+import { runSync, runSoftSync } from './sync-freshservice.js';
 
 const DEFAULT_INTERVAL_SECONDS = 300;   // 5 min
 const MIN_INTERVAL_SECONDS = 60;        // hard floor — Freshservice rate limits
@@ -53,18 +53,22 @@ export function setAutoSyncIntervalSeconds(seconds) {
   return clamped;
 }
 
-export async function triggerSync({ dryRun = false, source = 'manual' } = {}) {
+// mode: 'full' (default) wipes + reloads everything; 'soft' only adds assets new to
+// this app, leaving existing data untouched. Both share the single in-flight lock.
+export async function triggerSync({ dryRun = false, source = 'manual', mode = 'full' } = {}) {
   if (inFlight) throw new Error('Sync already in progress');
   const { domain, apiKey } = fsCredentials();
   if (!domain || !apiKey) throw new Error('Freshservice is not configured — save domain + API key first');
 
   inFlight = true;
   try {
-    const result = await runSync({ domain, apiKey, dryRun });
-    if (!dryRun) lastResult = { at: new Date().toISOString(), ok: true, source };
+    const result = mode === 'soft'
+      ? await runSoftSync({ domain, apiKey })
+      : await runSync({ domain, apiKey, dryRun });
+    if (!dryRun) lastResult = { at: new Date().toISOString(), ok: true, source, mode };
     return result;
   } catch (e) {
-    lastResult = { at: new Date().toISOString(), ok: false, error: e.message, source };
+    lastResult = { at: new Date().toISOString(), ok: false, error: e.message, source, mode };
     throw e;
   } finally {
     inFlight = false;

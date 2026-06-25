@@ -120,11 +120,13 @@ exportsRouter.get('/monthly-rebill.csv', asyncHandler(async (req, res) => {
   const month = rebillMonth(req.query.month);
   const baseline = findRebillBaseline(month);
 
-  const rows = baseline ? db.prepare(`
+  // Gross billable deployments (exempt assignments — e.g. warranty RMA swaps — excluded).
+  const gross = baseline ? db.prepare(`
     SELECT
+      a.location_id as location_id,
       COALESCE(l.name, '(Unassigned)') as Location,
       COUNT(*) as Deployed,
-      COALESCE(SUM(a.purchase_cost), 0) as RebillTotal
+      COALESCE(SUM(a.purchase_cost), 0) as GrossTotal
     FROM assignments asn
     JOIN assets a ON a.id = asn.asset_id
     JOIN asset_stock_snapshots s
@@ -132,17 +134,53 @@ exportsRouter.get('/monthly-rebill.csv', asyncHandler(async (req, res) => {
      AND s.asset_key = COALESCE(a.external_id, a.id)
     LEFT JOIN locations l ON l.id = a.location_id
     WHERE strftime('%Y-%m', asn.assigned_at) = ?
+      AND COALESCE(asn.rebill_exempt, 0) = 0
     GROUP BY a.location_id
-    ORDER BY Location
   `).all(baseline, month) : [];
+
+  // Manual per-location credits for the month.
+  const creditRows = db.prepare(`
+    SELECT c.location_id as location_id,
+           COALESCE(ml.name, '(Unassigned)') as Location,
+           COALESCE(SUM(c.amount), 0) as Credits
+    FROM rebill_credits c
+    LEFT JOIN locations ml ON ml.id = c.location_id
+    WHERE c.month = ?
+    GROUP BY c.location_id
+  `).all(month);
+
+  const byLoc = new Map();
+  const keyOf = (lid) => lid ?? '__unassigned__';
+  for (const g of gross) {
+    byLoc.set(keyOf(g.location_id), { Location: g.Location, Deployed: g.Deployed, GrossTotal: g.GrossTotal || 0, Credits: 0 });
+  }
+  for (const c of creditRows) {
+    const k = keyOf(c.location_id);
+    const e = byLoc.get(k) || { Location: c.Location, Deployed: 0, GrossTotal: 0, Credits: 0 };
+    e.Credits = c.Credits || 0;
+    byLoc.set(k, e);
+  }
+
+  const round2 = (n) => Math.round((n || 0) * 100) / 100;
+  const rows = [...byLoc.values()]
+    .map((r) => ({
+      Location: r.Location,
+      Deployed: r.Deployed,
+      GrossTotal: round2(r.GrossTotal),
+      Credits: round2(r.Credits),
+      RebillTotal: round2(r.GrossTotal - r.Credits),
+    }))
+    .sort((a, b) => a.Location.localeCompare(b.Location));
 
   const totals = rows.reduce(
     (acc, r) => ({
       Location: 'TOTAL',
       Deployed: acc.Deployed + r.Deployed,
-      RebillTotal: Math.round((acc.RebillTotal + r.RebillTotal) * 100) / 100,
+      GrossTotal: round2(acc.GrossTotal + r.GrossTotal),
+      Credits: round2(acc.Credits + r.Credits),
+      RebillTotal: round2(acc.RebillTotal + r.RebillTotal),
     }),
-    { Location: 'TOTAL', Deployed: 0, RebillTotal: 0 },
+    { Location: 'TOTAL', Deployed: 0, GrossTotal: 0, Credits: 0, RebillTotal: 0 },
   );
   rows.push(totals);
 
@@ -152,12 +190,15 @@ exportsRouter.get('/monthly-rebill.csv', asyncHandler(async (req, res) => {
   res.send(csv);
 }));
 
-// One row per device that transitioned from stock in the month.
+// One row per billable device that transitioned from stock in the month, plus credit
+// lines. Exempt deployments (e.g. warranty RMA swaps) are excluded entirely — they are
+// not part of the bill. LineType ∈ {BILLABLE, CREDIT}; the signed Cost column sums to
+// the net rebill (BILLABLE = +cost, CREDIT = -amount), reproducing the summary.
 exportsRouter.get('/monthly-rebill-detail.csv', asyncHandler(async (req, res) => {
   const month = rebillMonth(req.query.month);
   const baseline = findRebillBaseline(month);
 
-  const rows = baseline ? db.prepare(`
+  const lineItems = baseline ? db.prepare(`
     SELECT
       COALESCE(l.name, '(Unassigned)') as Location,
       a.asset_tag    as AssetTag,
@@ -168,7 +209,7 @@ exportsRouter.get('/monthly-rebill-detail.csv', asyncHandler(async (req, res) =>
       u.name         as AssignedTo,
       u.email        as AssignedEmail,
       asn.assigned_at as DeployedAt,
-      COALESCE(a.purchase_cost, 0) as Cost
+      COALESCE(a.purchase_cost, 0) as PurchaseCost
     FROM assignments asn
     JOIN assets a ON a.id = asn.asset_id
     JOIN asset_stock_snapshots s
@@ -177,8 +218,36 @@ exportsRouter.get('/monthly-rebill-detail.csv', asyncHandler(async (req, res) =>
     LEFT JOIN locations l ON l.id = a.location_id
     LEFT JOIN users u ON u.id = asn.user_id
     WHERE strftime('%Y-%m', asn.assigned_at) = ?
+      AND COALESCE(asn.rebill_exempt, 0) = 0
     ORDER BY Location, asn.assigned_at, a.asset_tag
   `).all(baseline, month) : [];
+
+  const credits = db.prepare(`
+    SELECT COALESCE(l.name, '(Unassigned)') as Location,
+           c.amount as Amount, c.reason as Reason,
+           a.asset_tag as AssetTag, a.model as Model, a.category as Category
+    FROM rebill_credits c
+    LEFT JOIN locations l ON l.id = c.location_id
+    LEFT JOIN assets a ON a.id = c.asset_id
+    WHERE c.month = ?
+    ORDER BY Location, c.created_at
+  `).all(month);
+
+  const round2 = (n) => Math.round((n || 0) * 100) / 100;
+  const shape = (o) => ({
+    Location: o.Location, LineType: o.LineType, AssetTag: o.AssetTag || '', Category: o.Category || '',
+    Manufacturer: o.Manufacturer || '', Model: o.Model || '', SerialNumber: o.SerialNumber || '',
+    AssignedTo: o.AssignedTo || '', AssignedEmail: o.AssignedEmail || '', DeployedAt: o.DeployedAt || '',
+    Reason: o.Reason || '', Cost: round2(o.Cost),
+  });
+
+  const rows = [
+    ...lineItems.map((r) => shape({ ...r, LineType: 'BILLABLE', Cost: r.PurchaseCost })),
+    ...credits.map((c) => shape({
+      Location: c.Location, LineType: 'CREDIT', AssetTag: c.AssetTag, Model: c.Model, Category: c.Category,
+      Reason: c.Reason, Cost: -c.Amount,
+    })),
+  ].sort((a, b) => a.Location.localeCompare(b.Location) || a.LineType.localeCompare(b.LineType));
 
   const csv = stringify(rows, { header: true });
   res.setHeader('Content-Type', 'text/csv');

@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { db } from '../db.js';
-import { asyncHandler, depreciatedValue, logActivity } from '../util.js';
+import { asyncHandler, depreciatedValue, logActivity, id } from '../util.js';
 
 export const reportsRouter = Router();
 
@@ -352,10 +352,11 @@ function buildRebill(month) {
   const locations = db.prepare(`SELECT id, name FROM locations ORDER BY name`).all();
   const nameById = new Map(locations.map((l) => [l.id, l.name]));
 
+  // Gross billable deployments — exempt assignments (e.g. warranty RMA swaps) are excluded.
   const rows = db.prepare(`
     SELECT a.location_id as location_id,
            COUNT(*) as deployed,
-           COALESCE(SUM(a.purchase_cost), 0) as rebill_total
+           COALESCE(SUM(a.purchase_cost), 0) as gross_total
     FROM assignments asn
     JOIN assets a ON a.id = asn.asset_id
     JOIN asset_stock_snapshots s
@@ -363,22 +364,55 @@ function buildRebill(month) {
      AND s.asset_key = COALESCE(a.external_id, a.id)
     WHERE strftime('%Y-%m', asn.assigned_at) = ?
       AND a.status = 'deployed'
+      AND COALESCE(asn.rebill_exempt, 0) = 0
     GROUP BY a.location_id
   `).all(baseline, month);
 
-  const data = rows.map((r) => ({
+  // Manual per-location credits for the month (subtracted from the gross).
+  const creditRows = db.prepare(`
+    SELECT location_id, COALESCE(SUM(amount), 0) as credit_total
+    FROM rebill_credits
+    WHERE month = ?
+    GROUP BY location_id
+  `).all(month);
+
+  // Merge gross + credits keyed by location (a location may have only credits and
+  // no deployments — e.g. a prior-month correction — and must still show a row).
+  const byLoc = new Map();
+  const keyOf = (lid) => lid ?? '__unassigned__';
+  for (const r of rows) {
+    byLoc.set(keyOf(r.location_id), {
+      location_id: r.location_id,
+      deployed: r.deployed,
+      gross_total: r.gross_total || 0,
+      credit_total: 0,
+    });
+  }
+  for (const c of creditRows) {
+    const k = keyOf(c.location_id);
+    const entry = byLoc.get(k) || { location_id: c.location_id, deployed: 0, gross_total: 0, credit_total: 0 };
+    entry.credit_total = c.credit_total || 0;
+    byLoc.set(k, entry);
+  }
+
+  const round2 = (n) => Math.round((n || 0) * 100) / 100;
+  const data = [...byLoc.values()].map((r) => ({
     location_id: r.location_id,
     location_name: r.location_id ? nameById.get(r.location_id) || '(Unknown)' : '(Unassigned)',
     deployed: r.deployed,
-    rebill_total: Math.round((r.rebill_total || 0) * 100) / 100,
+    gross_total: round2(r.gross_total),
+    credit_total: round2(r.credit_total),
+    rebill_total: round2(r.gross_total - r.credit_total),
   })).sort((a, b) => a.location_name.localeCompare(b.location_name));
 
   const totals = data.reduce(
     (acc, r) => ({
       deployed: acc.deployed + r.deployed,
-      rebill_total: Math.round((acc.rebill_total + r.rebill_total) * 100) / 100,
+      gross_total: round2(acc.gross_total + r.gross_total),
+      credit_total: round2(acc.credit_total + r.credit_total),
+      rebill_total: round2(acc.rebill_total + r.rebill_total),
     }),
-    { deployed: 0, rebill_total: 0 },
+    { deployed: 0, gross_total: 0, credit_total: 0, rebill_total: 0 },
   );
 
   return { month, baseline, data, totals };
@@ -397,12 +431,13 @@ reportsRouter.get('/monthly-rebill/detail', asyncHandler(async (req, res) => {
 
   const locParam = req.query.location_id == null ? null : String(req.query.location_id);
   const locFilter = locParam ? 'a.location_id = ?' : 'a.location_id IS NULL';
-  const params = [baseline, month];
-  if (locParam) params.push(locParam);
 
-  const rows = db.prepare(`
-    SELECT a.id, a.asset_tag, a.category, a.model, a.manufacturer, a.serial_number,
+  // Both billable and exempt line items come from the same query, differing only by
+  // the exemption flag; we split them in JS so the UI can show exemptions separately.
+  const lineItems = db.prepare(`
+    SELECT asn.id as assignment_id, a.id, a.asset_tag, a.category, a.model, a.manufacturer, a.serial_number,
            asn.assigned_at as event_at, a.purchase_cost as cost,
+           COALESCE(asn.rebill_exempt, 0) as rebill_exempt, asn.rebill_exempt_reason,
            u.name as user_name, u.email as user_email
     FROM assignments asn
     JOIN assets a ON a.id = asn.asset_id
@@ -412,9 +447,130 @@ reportsRouter.get('/monthly-rebill/detail', asyncHandler(async (req, res) => {
     LEFT JOIN users u ON u.id = asn.user_id
     WHERE strftime('%Y-%m', asn.assigned_at) = ? AND a.status = 'deployed' AND ${locFilter}
     ORDER BY asn.assigned_at, a.asset_tag
-  `).all(...params);
+  `).all(...(locParam ? [baseline, month, locParam] : [baseline, month]));
+
+  const data = lineItems.filter((r) => !r.rebill_exempt);
+  const exempt = lineItems.filter((r) => r.rebill_exempt);
+
+  // Manual credits for this location/month (linked asset detail joined for context).
+  const credits = db.prepare(`
+    SELECT c.id, c.amount, c.reason, c.created_at, c.actor, c.asset_id,
+           a.asset_tag, a.model
+    FROM rebill_credits c
+    LEFT JOIN assets a ON a.id = c.asset_id
+    WHERE c.month = ? AND ${locParam ? 'c.location_id = ?' : 'c.location_id IS NULL'}
+    ORDER BY c.created_at
+  `).all(...(locParam ? [month, locParam] : [month]));
+
+  res.json({ data, exempt, credits, baseline });
+}));
+
+// All exempted deployments for the month, across every location. Backs the
+// month-level "exempted devices" panel so they can be reviewed and restored even
+// when their location has no billable rows left and so dropped out of the summary.
+reportsRouter.get('/monthly-rebill/exemptions', asyncHandler(async (req, res) => {
+  const month = monthOrDefault(req.query.month);
+  const baseline = findBaseline(month);
+  if (!baseline) return res.json({ data: [], baseline: null });
+
+  const rows = db.prepare(`
+    SELECT asn.id as assignment_id, a.id, a.asset_tag, a.category, a.model, a.manufacturer,
+           a.serial_number, asn.assigned_at as event_at, a.purchase_cost as cost,
+           asn.rebill_exempt_reason, a.location_id,
+           COALESCE(l.name, '(Unassigned)') as location_name
+    FROM assignments asn
+    JOIN assets a ON a.id = asn.asset_id
+    JOIN asset_stock_snapshots s
+      ON s.snapshot_at = ?
+     AND s.asset_key = COALESCE(a.external_id, a.id)
+    LEFT JOIN locations l ON l.id = a.location_id
+    WHERE strftime('%Y-%m', asn.assigned_at) = ? AND a.status = 'deployed'
+      AND COALESCE(asn.rebill_exempt, 0) = 1
+    ORDER BY location_name, asn.assigned_at, a.asset_tag
+  `).all(baseline, month);
 
   res.json({ data: rows, baseline });
+}));
+
+// Toggle whether a specific deployment bills. Used for warranty RMA swaps: the
+// replacement pulled from stock shouldn't bill because the defective unit went
+// back to the vendor. Body: { exempt: bool, reason?: string }.
+reportsRouter.post('/monthly-rebill/assignments/:id/exempt', asyncHandler(async (req, res) => {
+  const { id: assignmentId } = req.params;
+  const exempt = req.body?.exempt ? 1 : 0;
+  const reason = exempt ? (req.body?.reason || null) : null;
+
+  const asn = db.prepare(`
+    SELECT asn.id, a.asset_tag
+    FROM assignments asn JOIN assets a ON a.id = asn.asset_id
+    WHERE asn.id = ?
+  `).get(assignmentId);
+  if (!asn) return res.status(404).json({ error: 'assignment not found' });
+
+  db.prepare(`UPDATE assignments SET rebill_exempt = ?, rebill_exempt_reason = ? WHERE id = ?`)
+    .run(exempt, reason, assignmentId);
+
+  logActivity({
+    kind: exempt ? 'rebill.exempt.added' : 'rebill.exempt.removed',
+    summary: exempt
+      ? `Exempted ${asn.asset_tag} from rebill${reason ? ` — ${reason}` : ''}`
+      : `Removed rebill exemption on ${asn.asset_tag}`,
+    ref_type: 'asset',
+    ref_id: assignmentId,
+    actor: req.user?.email || 'system',
+  });
+
+  res.json({ assignment_id: assignmentId, rebill_exempt: exempt, rebill_exempt_reason: reason });
+}));
+
+// ---------- Rebill credits ----------
+// Free-form per-location monthly adjustments, subtracted from a location's rebill.
+
+reportsRouter.get('/rebill-credits', asyncHandler(async (req, res) => {
+  const month = monthOrDefault(req.query.month);
+  const rows = db.prepare(`
+    SELECT c.id, c.month, c.location_id, c.amount, c.reason, c.asset_id,
+           c.created_at, c.actor, l.name as location_name, a.asset_tag, a.model
+    FROM rebill_credits c
+    LEFT JOIN locations l ON l.id = c.location_id
+    LEFT JOIN assets a ON a.id = c.asset_id
+    WHERE c.month = ?
+    ORDER BY l.name, c.created_at
+  `).all(month);
+  res.json({ month, data: rows });
+}));
+
+reportsRouter.post('/rebill-credits', asyncHandler(async (req, res) => {
+  const { month, location_id = null, amount, reason = null, asset_id = null } = req.body || {};
+  if (!/^\d{4}-\d{2}$/.test(month || '')) return res.status(400).json({ error: 'month required (YYYY-MM)' });
+  const amt = Number(amount);
+  if (!Number.isFinite(amt) || amt <= 0) return res.status(400).json({ error: 'amount must be a positive number' });
+
+  const creditId = id('rbc');
+  db.prepare(`
+    INSERT INTO rebill_credits (id, month, location_id, amount, reason, asset_id, actor)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(creditId, month, location_id || null, Math.round(amt * 100) / 100, reason || null, asset_id || null, req.user?.email || 'system');
+
+  const locName = location_id
+    ? (db.prepare(`SELECT name FROM locations WHERE id = ?`).get(location_id)?.name || location_id)
+    : '(Unassigned)';
+  logActivity({
+    kind: 'rebill.credit.added',
+    summary: `Credited ${locName} $${(Math.round(amt * 100) / 100).toLocaleString()} for ${month}${reason ? ` — ${reason}` : ''}`,
+    ref_type: 'location',
+    ref_id: location_id || null,
+    actor: req.user?.email || 'system',
+  });
+
+  res.status(201).json({ id: creditId });
+}));
+
+reportsRouter.delete('/rebill-credits/:id', asyncHandler(async (req, res) => {
+  const r = db.prepare(`DELETE FROM rebill_credits WHERE id = ?`).run(req.params.id);
+  if (r.changes === 0) return res.status(404).json({ error: 'credit not found' });
+  logActivity({ kind: 'rebill.credit.removed', summary: `Removed rebill credit ${req.params.id}`, actor: req.user?.email || 'system' });
+  res.status(204).end();
 }));
 
 // ---------- Expiring assets ----------

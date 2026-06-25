@@ -70,7 +70,8 @@ integrationsRouter.delete('/freshservice', asyncHandler(async (_req, res) => {
 integrationsRouter.post('/freshservice/sync', asyncHandler(async (req, res) => {
   try {
     const dryRun = req.query.dry_run === '1';
-    const result = await triggerSync({ dryRun, source: 'manual' });
+    const mode = req.query.mode === 'soft' ? 'soft' : 'full';
+    const result = await triggerSync({ dryRun, mode, source: 'manual' });
     res.json(result);
   } catch (e) {
     const msg = e.message || '';

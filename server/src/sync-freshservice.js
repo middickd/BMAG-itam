@@ -229,11 +229,166 @@ export async function runSync({ domain, apiKey, dryRun = false, log = console.lo
   };
 }
 
+// Incremental, NON-destructive sync. Pulls only assets whose Freshservice id we
+// don't already have locally and inserts them; existing assets, users, locations,
+// assignments, maintenance, and local edits are left completely untouched. New
+// assets' referenced location/user are materialized on demand if missing.
+//
+// Freshservice's asset list has no reliable "created since" server filter, so we
+// fetch the list and diff against our existing external_ids in-process. The win is
+// not network volume — it's that nothing is wiped or rewritten. Deliberately does
+// NOT take a stock snapshot: a soft sync sees only new rows, not the full in-stock
+// state, so snapshotting from it would record a misleading baseline. Run a full
+// sync (or POST /api/reports/take-snapshot) when you need a fresh baseline.
+export async function runSoftSync({ domain, apiKey, log = console.log }) {
+  if (!domain || !apiKey) {
+    throw new Error('Freshservice domain and API key required');
+  }
+
+  initSchema();
+  const fs = new FreshserviceClient({ domain, apiKey });
+  log(`[soft-sync] Connecting to ${domain}...`);
+
+  const [assetTypes, locations, requesters, agents, products, vendors, assets] = await Promise.all([
+    fs.listAssetTypes(),
+    fs.listLocations(),
+    fs.listRequesters(),
+    fs.listAgents(),
+    fs.listProducts().catch(() => []),
+    fs.listVendors().catch(() => []),
+    fs.listAssets(),
+  ]);
+
+  const typeById = new Map(assetTypes.map((t) => [t.id, t]));
+  const categoryFor = (typeId) => typeById.get(typeId)?.name || 'Hardware';
+  const ctx = {
+    categoryFor,
+    productById: new Map(products.map((p) => [p.id, p])),
+    vendorById: new Map(vendors.map((v) => [v.id, v])),
+  };
+
+  // Existing local rows keyed by their Freshservice external_id (and email for users,
+  // to avoid a UNIQUE(email) collision when FS rotated an id for the same person).
+  const locByExt = new Map(
+    db.prepare(`SELECT external_id, id FROM locations WHERE external_id IS NOT NULL`).all().map((r) => [r.external_id, r.id]),
+  );
+  const userByExt = new Map(
+    db.prepare(`SELECT external_id, id FROM users WHERE external_id IS NOT NULL`).all().map((r) => [r.external_id, r.id]),
+  );
+  const userIdByEmail = new Map(
+    db.prepare(`SELECT email, id FROM users`).all().map((r) => [r.email, r.id]),
+  );
+  const existingAssetExt = new Set(
+    db.prepare(`SELECT external_id FROM assets WHERE external_id IS NOT NULL`).all().map((r) => r.external_id),
+  );
+  const seenTags = new Set(db.prepare(`SELECT asset_tag FROM assets`).all().map((r) => r.asset_tag));
+
+  // FS source rows, so we can materialize a referenced location/user that isn't local yet.
+  const fsLocById = new Map(locations.map((l) => [String(l.id), l]));
+  const fsUserById = new Map();
+  const fsUserRole = new Map();
+  for (const r of requesters) { fsUserById.set(String(r.id), r); fsUserRole.set(String(r.id), 'user'); }
+  for (const a of agents)     { fsUserById.set(String(a.id), a); fsUserRole.set(String(a.id), 'admin'); }
+
+  const newAssets = assets.filter((a) => !existingAssetExt.has(String(a.id)));
+  log(`[soft-sync] ${assets.length} assets in Freshservice, ${newAssets.length} new since last sync`);
+
+  const counts = { scanned: assets.length, new_assets: 0, new_users: 0, new_locations: 0, assignments: 0, deduped: 0 };
+
+  const locStmt = db.prepare(`
+    INSERT INTO locations (id, name, address, city, country, external_id, source)
+    VALUES (?, ?, ?, ?, ?, ?, 'freshservice')
+  `);
+  const userStmt = db.prepare(`
+    INSERT INTO users (id, email, name, role, department, title, external_id, source)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 'freshservice')
+  `);
+  const assetStmt = db.prepare(`
+    INSERT INTO assets (
+      id, asset_tag, category, model, manufacturer, serial_number, status,
+      location_id, assigned_to, assigned_at, purchase_date, purchase_cost,
+      warranty_expires_at, notes, external_id, external_display_id, source
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'freshservice')
+  `);
+  const asnStmt = db.prepare('INSERT INTO assignments (id, asset_id, user_id, assigned_at) VALUES (?, ?, ?, ?)');
+
+  const ensureLocation = (extId) => {
+    if (!extId) return null;
+    if (locByExt.has(extId)) return locByExt.get(extId);
+    const src = fsLocById.get(extId);
+    if (!src) return null;
+    const mapped = mapLocation(src);
+    const newId = id('loc');
+    locStmt.run(newId, mapped.name, mapped.address, mapped.city, mapped.country, mapped.external_id);
+    locByExt.set(extId, newId);
+    counts.new_locations++;
+    return newId;
+  };
+  const ensureUser = (extId) => {
+    if (!extId) return null;
+    if (userByExt.has(extId)) return userByExt.get(extId);
+    const src = fsUserById.get(extId);
+    if (!src) return null;
+    const mapped = mapUser(src);
+    if (!mapped.email) return null;
+    // Same person, new FS id: reuse the existing local user rather than collide on email.
+    if (userIdByEmail.has(mapped.email)) {
+      const existingId = userIdByEmail.get(mapped.email);
+      userByExt.set(extId, existingId);
+      return existingId;
+    }
+    const newId = id('usr');
+    userStmt.run(newId, mapped.email, mapped.name, fsUserRole.get(extId) || 'user', mapped.department, mapped.title, mapped.external_id);
+    userByExt.set(extId, newId);
+    userIdByEmail.set(mapped.email, newId);
+    counts.new_users++;
+    return newId;
+  };
+
+  const tx = db.transaction(() => {
+    for (const a of newAssets) {
+      const m = mapAsset(a, ctx);
+      let tag = m.asset_tag;
+      if (seenTags.has(tag)) { tag = `${tag}-${m.external_id}`; counts.deduped++; }
+      seenTags.add(tag);
+
+      const newId = id('ast');
+      const locationId = ensureLocation(m.fs_location_id);
+      const assignedTo = ensureUser(m.fs_user_id);
+      assetStmt.run(
+        newId, tag, m.category, m.model, m.manufacturer, m.serial_number,
+        m.status, locationId, assignedTo, m.assigned_at, m.purchase_date,
+        m.purchase_cost, m.warranty_expires_at, m.notes, m.external_id,
+        m.external_display_id,
+      );
+      counts.new_assets++;
+      if (assignedTo) {
+        asnStmt.run(id('asn'), newId, assignedTo, m.assigned_at || new Date().toISOString());
+        counts.assignments++;
+      }
+    }
+
+    logActivity({
+      kind: 'sync.freshservice',
+      summary: counts.new_assets > 0
+        ? `Soft sync from Freshservice: +${counts.new_assets} new assets, +${counts.new_users} users, +${counts.new_locations} locations`
+        : `Soft sync from Freshservice: no new assets (scanned ${counts.scanned})`,
+    });
+  });
+
+  tx();
+  log(`[soft-sync] Added ${counts.new_assets} assets, ${counts.new_users} users, ${counts.new_locations} locations. ${counts.assignments} assignments.`);
+
+  return { dryRun: false, mode: 'soft', counts };
+}
+
 async function main() {
-  await runSync({
+  const soft = process.argv.includes('--soft');
+  const runner = soft ? runSoftSync : runSync;
+  await runner({
     domain: process.env.FRESHSERVICE_DOMAIN,
     apiKey: process.env.FRESHSERVICE_API_KEY,
-    dryRun: process.argv.includes('--dry-run'),
+    dryRun: !soft && process.argv.includes('--dry-run'),
   });
 }
 

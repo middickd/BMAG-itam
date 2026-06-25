@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Building2, MapPin, Server, ShieldCheck, Plus, Pencil, Trash2, RefreshCw, Cloud, Link2Off, Clock } from 'lucide-react';
+import { Building2, MapPin, Server, ShieldCheck, Plus, Pencil, Trash2, RefreshCw, Cloud, Link2Off, Clock, DownloadCloud } from 'lucide-react';
 import { api, getCurrentUser } from '@/lib/api';
 import { PageHeader } from '@/components/PageHeader';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
@@ -195,6 +195,37 @@ function FreshserviceCard() {
     onError: (e) => fromError(e, 'Sync failed'),
   });
 
+  // Invalidate every query that displays FS-sourced data after any sync.
+  const invalidateFsData = () => {
+    qc.invalidateQueries({ queryKey: ['freshservice-status'] });
+    qc.invalidateQueries({ queryKey: ['assets'] });
+    qc.invalidateQueries({ queryKey: ['users'] });
+    qc.invalidateQueries({ queryKey: ['locations'] });
+    qc.invalidateQueries({ queryKey: ['dashboard'] });
+    qc.invalidateQueries({ queryKey: ['monthly-rebill'] });
+    qc.invalidateQueries({ queryKey: ['health'] });
+    qc.invalidateQueries({ queryKey: ['departments'] });
+  };
+
+  const softSync = useMutation({
+    mutationFn: () => api.post<{ counts: { new_assets: number; new_users: number; new_locations: number; scanned: number } }>(
+      '/integrations/freshservice/sync?mode=soft',
+    ),
+    onSuccess: (r) => {
+      const { counts } = r;
+      if (counts.new_assets === 0) {
+        toast.success('Already up to date', `No new assets in Freshservice (scanned ${counts.scanned}).`);
+      } else {
+        toast.success(
+          'Soft sync complete',
+          `+${counts.new_assets} new asset${counts.new_assets === 1 ? '' : 's'}, +${counts.new_users} user${counts.new_users === 1 ? '' : 's'}, +${counts.new_locations} location${counts.new_locations === 1 ? '' : 's'}.`,
+        );
+      }
+      invalidateFsData();
+    },
+    onError: (e) => fromError(e, 'Soft sync failed'),
+  });
+
   const disconnect = useMutation({
     mutationFn: () => api.delete('/integrations/freshservice'),
     onSuccess: () => {
@@ -204,8 +235,10 @@ function FreshserviceCard() {
     onError: (e) => fromError(e, 'Disconnect failed'),
   });
 
+  const busy = sync.isPending || softSync.isPending || !!status?.sync_in_flight;
+
   const onSyncClick = () => {
-    if (confirm('Sync from Freshservice now? This will wipe and reload all assets, users, and locations.')) {
+    if (confirm('Full sync from Freshservice now? This will wipe and reload all assets, users, and locations.')) {
       sync.mutate();
     }
   };
@@ -230,11 +263,22 @@ function FreshserviceCard() {
               <>
                 <Button
                   size="sm"
+                  onClick={() => softSync.mutate()}
+                  disabled={busy}
+                  title="Pull only assets that are new since the last sync — leaves existing records, assignments, and edits untouched"
+                >
+                  <DownloadCloud className={`h-4 w-4 ${softSync.isPending ? 'animate-spin' : ''}`} />
+                  {softSync.isPending ? 'Syncing…' : 'Soft sync'}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
                   onClick={onSyncClick}
-                  disabled={sync.isPending || status.sync_in_flight}
+                  disabled={busy}
+                  title="Wipe and reload all assets, users, and locations from Freshservice"
                 >
                   <RefreshCw className={`h-4 w-4 ${sync.isPending || status.sync_in_flight ? 'animate-spin' : ''}`} />
-                  {sync.isPending || status.sync_in_flight ? 'Syncing…' : 'Sync now'}
+                  {sync.isPending || status.sync_in_flight ? 'Syncing…' : 'Full sync'}
                 </Button>
                 <Button size="sm" variant="outline" onClick={() => setConfigOpen(true)}>
                   <Pencil className="h-4 w-4" /> Update credentials
