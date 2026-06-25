@@ -4,10 +4,13 @@ import { fileURLToPath } from 'node:url';
 import fs from 'node:fs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const dataDir = path.resolve(__dirname, '..', 'data');
+// Resolve the DB path first, then ensure only its containing dir exists. Creating
+// the default server/data dir unconditionally breaks the container, where DB_PATH
+// points at a writable volume (/data) but /app/server is root-owned and the
+// process runs as the unprivileged `node` user.
+const dbPath = process.env.DB_PATH || path.resolve(__dirname, '..', 'data', 'itam.db');
+const dataDir = path.dirname(dbPath);
 if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
-
-const dbPath = process.env.DB_PATH || path.join(dataDir, 'itam.db');
 export const db = new Database(dbPath);
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
