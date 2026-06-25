@@ -359,7 +359,7 @@ function FreshserviceConfigDialog({
   const [apiKey, setApiKey] = useState('');
 
   // Reset fields each time the dialog opens
-  useStateSyncOnOpen({ open, initialDomain }, () => {
+  useStateSyncOnOpen(open, () => {
     if (open) { setDomain(initialDomain); setApiKey(''); }
   });
 
@@ -441,7 +441,7 @@ function AutoSyncDialog({
   const [preset, setPreset] = useState(presetMatch ? presetMatch.value : 'custom');
   const [custom, setCustom] = useState(presetMatch ? '' : String(currentSeconds));
 
-  useStateSyncOnOpen({ open, currentSeconds }, () => {
+  useStateSyncOnOpen(open, () => {
     if (open) {
       const m = AUTO_SYNC_PRESETS.find((p) => Number(p.value) === currentSeconds);
       setPreset(m ? m.value : 'custom');

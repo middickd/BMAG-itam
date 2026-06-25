@@ -33,6 +33,17 @@ Or via PowerShell (`appcmd`):
 & "$env:windir\system32\inetsrv\appcmd.exe" set config -section:system.webServer/proxy /enabled:"True" /commit:apphost
 ```
 
+**Also disable response-header host rewriting** (this one is mandatory, and easy to
+miss). When ARR proxy is enabled, `reverseRewriteHostInResponseHeaders` defaults to
+**true**, which rewrites the host of *any* `Location` response header to the inbound
+host (`itam.bobmoore.com`). That silently mangles the app's OIDC redirect to
+`login.microsoftonline.com` into `itam.bobmoore.com/...`, so Microsoft sign-in loops
+back to the SPA and never logs in. Turn it off:
+
+```powershell
+& "$env:windir\system32\inetsrv\appcmd.exe" set config -section:system.webServer/proxy /reverseRewriteHostInResponseHeaders:"False" /commit:apphost
+```
+
 ## 2. Create the proxy site
 
 ```powershell
@@ -89,4 +100,5 @@ In the Entra app for BMAG-itam:
 | `404` from IIS, not the app | URL Rewrite module missing, or `web.config` not in the site's physical path. |
 | Cert warning in browser | Wrong cert bound, or hostname mismatch — the cert CN/SAN must include `itam.bobmoore.com`. |
 | Login loop | `APP_BASE_URL` or the Entra redirect URI doesn't exactly match `https://itam.bobmoore.com`. |
+| Sign-in redirects to `https://itam.bobmoore.com/<tenant>/oauth2/...` instead of `login.microsoftonline.com` | ARR is rewriting the `Location` header — disable `reverseRewriteHostInResponseHeaders` (step 1). |
 | Large CSV import rejected (`413`) | Raise `maxAllowedContentLength` in `web.config`. |
