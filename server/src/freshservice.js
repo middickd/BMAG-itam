@@ -22,6 +22,21 @@ function parseNextLink(linkHeader) {
   return url ? url[1] : null;
 }
 
+// FS's `Link: rel="next"` URL carries only `page=N` — it drops the query params we
+// sent on page 1 (notably `include=type_fields` and `per_page`). Without them, page 2+
+// come back WITHOUT type_fields, so every asset past the first page maps with an empty
+// custom-field blob (no cost, purchase_date, warranty, serial). Re-apply any param from
+// the page we just fetched that the next-link is missing, so includes/per_page persist
+// across the entire pagination.
+function carryQueryParams(nextUrl, prevUrl) {
+  const next = new URL(nextUrl);
+  const prev = new URL(prevUrl);
+  for (const [k, v] of prev.searchParams) {
+    if (!next.searchParams.has(k)) next.searchParams.set(k, v);
+  }
+  return next.toString();
+}
+
 export class FreshserviceClient {
   constructor({ domain, apiKey, fetchImpl = globalThis.fetch }) {
     if (!domain) throw new Error('Freshservice domain required (e.g. company.freshservice.com)');
@@ -127,7 +142,9 @@ export class FreshserviceClient {
       const { json, link } = await this.request(next);
       const rows = Array.isArray(json) ? json : json[key] || [];
       for (const row of rows) yield row;
-      next = parseNextLink(link);
+      const nextLink = parseNextLink(link);
+      // FS drops our query params on the next-link; carry them forward (see carryQueryParams).
+      next = nextLink ? carryQueryParams(nextLink, next) : null;
     }
   }
 
