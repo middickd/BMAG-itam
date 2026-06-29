@@ -43,7 +43,10 @@ export function pickAssetUpdate(body) {
 }
 
 export function depreciatedValue(asset, asOf = new Date()) {
-  if (!asset.purchase_cost || !asset.purchase_date) return null;
+  if (!asset.purchase_cost) return null;
+  // Without a purchase date we can't depreciate, so the value is just the cost.
+  // (Common for assets whose cost came from Freshservice but no acquisition date.)
+  if (!asset.purchase_date) return asset.purchase_cost;
   const years = asset.depreciation_years || 3;
   const purchased = new Date(asset.purchase_date);
   const ageYears = (asOf - purchased) / (1000 * 60 * 60 * 24 * 365.25);
