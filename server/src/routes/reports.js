@@ -352,20 +352,25 @@ function buildRebill(month) {
   const locations = db.prepare(`SELECT id, name FROM locations ORDER BY name`).all();
   const nameById = new Map(locations.map((l) => [l.id, l.name]));
 
-  // Gross billable deployments — exempt assignments (e.g. warranty RMA swaps) are excluded.
+  // Gross billable deployments. Each asset bills at most once per month, even if it
+  // has several assignment rows dated in the month (e.g. a reassignment after a stock
+  // sync). The inner GROUP BY a.id collapses those rows; HAVING MAX(rebill_exempt)=0
+  // drops the asset entirely when ANY of its rows is exempt (e.g. a warranty RMA swap).
   const rows = db.prepare(`
-    SELECT a.location_id as location_id,
-           COUNT(*) as deployed,
-           COALESCE(SUM(a.purchase_cost), 0) as gross_total
-    FROM assignments asn
-    JOIN assets a ON a.id = asn.asset_id
-    JOIN asset_stock_snapshots s
-      ON s.snapshot_at = ?
-     AND s.asset_key = COALESCE(a.external_id, a.id)
-    WHERE strftime('%Y-%m', asn.assigned_at) = ?
-      AND a.status = 'deployed'
-      AND COALESCE(asn.rebill_exempt, 0) = 0
-    GROUP BY a.location_id
+    SELECT location_id, COUNT(*) as deployed, COALESCE(SUM(cost), 0) as gross_total
+    FROM (
+      SELECT a.location_id as location_id, a.purchase_cost as cost
+      FROM assignments asn
+      JOIN assets a ON a.id = asn.asset_id
+      JOIN asset_stock_snapshots s
+        ON s.snapshot_at = ?
+       AND s.asset_key = COALESCE(a.external_id, a.id)
+      WHERE strftime('%Y-%m', asn.assigned_at) = ?
+        AND a.status = 'deployed'
+      GROUP BY a.id
+      HAVING MAX(COALESCE(asn.rebill_exempt, 0)) = 0
+    )
+    GROUP BY location_id
   `).all(baseline, month);
 
   // Manual per-location credits for the month (subtracted from the gross).
@@ -449,8 +454,23 @@ reportsRouter.get('/monthly-rebill/detail', asyncHandler(async (req, res) => {
     ORDER BY asn.assigned_at, a.asset_tag
   `).all(...(locParam ? [baseline, month, locParam] : [baseline, month]));
 
-  const data = lineItems.filter((r) => !r.rebill_exempt);
-  const exempt = lineItems.filter((r) => r.rebill_exempt);
+  // Collapse to one billable unit per asset. An asset can have several assignment
+  // rows dated in the month (a reassignment after a sync, etc.); bill it once, and
+  // treat the whole asset as exempt if ANY of its rows is exempt — so exempting a
+  // device drops every duplicate line, not just the row that was clicked. When the
+  // asset is exempt we keep an exempt row as the representative so Restore targets a
+  // genuinely-exempt assignment; otherwise we keep the most recent deployment.
+  const byAsset = new Map();
+  for (const r of lineItems) {
+    const row = { ...r, rebill_exempt: r.rebill_exempt ? 1 : 0 };
+    const cur = byAsset.get(r.id);
+    if (!cur) { byAsset.set(r.id, row); continue; }
+    if (row.rebill_exempt && !cur.rebill_exempt) byAsset.set(r.id, row);
+    else if (row.rebill_exempt === cur.rebill_exempt && row.event_at > cur.event_at) byAsset.set(r.id, row);
+  }
+  const grouped = [...byAsset.values()];
+  const data = grouped.filter((r) => !r.rebill_exempt);
+  const exempt = grouped.filter((r) => r.rebill_exempt);
 
   // Manual credits for this location/month (linked asset detail joined for context).
   const credits = db.prepare(`
@@ -489,7 +509,12 @@ reportsRouter.get('/monthly-rebill/exemptions', asyncHandler(async (req, res) =>
     ORDER BY location_name, asn.assigned_at, a.asset_tag
   `).all(baseline, month);
 
-  res.json({ data: rows, baseline });
+  // One entry per asset — an asset with several exempt rows in the month should
+  // appear once. Keeps the first row per asset (ordered above), with its reason.
+  const seen = new Set();
+  const data = rows.filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)));
+
+  res.json({ data, baseline });
 }));
 
 // Toggle whether a specific deployment bills. Used for warranty RMA swaps: the

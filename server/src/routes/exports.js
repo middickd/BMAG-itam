@@ -120,22 +120,27 @@ exportsRouter.get('/monthly-rebill.csv', asyncHandler(async (req, res) => {
   const month = rebillMonth(req.query.month);
   const baseline = findRebillBaseline(month);
 
-  // Gross billable deployments (exempt assignments — e.g. warranty RMA swaps — excluded).
+  // Gross billable deployments. Each asset bills at most once per month (collapse
+  // duplicate in-month assignment rows via GROUP BY a.id), and an asset is excluded
+  // entirely if ANY of its rows is exempt — e.g. a warranty RMA swap. Mirrors the
+  // live report in routes/reports.js so the CSV matches the UI.
   const gross = baseline ? db.prepare(`
-    SELECT
-      a.location_id as location_id,
-      COALESCE(l.name, '(Unassigned)') as Location,
-      COUNT(*) as Deployed,
-      COALESCE(SUM(a.purchase_cost), 0) as GrossTotal
-    FROM assignments asn
-    JOIN assets a ON a.id = asn.asset_id
-    JOIN asset_stock_snapshots s
-      ON s.snapshot_at = ?
-     AND s.asset_key = COALESCE(a.external_id, a.id)
-    LEFT JOIN locations l ON l.id = a.location_id
-    WHERE strftime('%Y-%m', asn.assigned_at) = ?
-      AND COALESCE(asn.rebill_exempt, 0) = 0
-    GROUP BY a.location_id
+    SELECT location_id, COALESCE(l.name, '(Unassigned)') as Location,
+           COUNT(*) as Deployed, COALESCE(SUM(cost), 0) as GrossTotal
+    FROM (
+      SELECT a.location_id as location_id, a.purchase_cost as cost
+      FROM assignments asn
+      JOIN assets a ON a.id = asn.asset_id
+      JOIN asset_stock_snapshots s
+        ON s.snapshot_at = ?
+       AND s.asset_key = COALESCE(a.external_id, a.id)
+      WHERE strftime('%Y-%m', asn.assigned_at) = ?
+        AND a.status = 'deployed'
+      GROUP BY a.id
+      HAVING MAX(COALESCE(asn.rebill_exempt, 0)) = 0
+    )
+    LEFT JOIN locations l ON l.id = location_id
+    GROUP BY location_id
   `).all(baseline, month) : [];
 
   // Manual per-location credits for the month.
@@ -198,8 +203,9 @@ exportsRouter.get('/monthly-rebill-detail.csv', asyncHandler(async (req, res) =>
   const month = rebillMonth(req.query.month);
   const baseline = findRebillBaseline(month);
 
-  const lineItems = baseline ? db.prepare(`
+  const rawLineItems = baseline ? db.prepare(`
     SELECT
+      a.id           as AssetId,
       COALESCE(l.name, '(Unassigned)') as Location,
       a.asset_tag    as AssetTag,
       a.category     as Category,
@@ -209,6 +215,7 @@ exportsRouter.get('/monthly-rebill-detail.csv', asyncHandler(async (req, res) =>
       u.name         as AssignedTo,
       u.email        as AssignedEmail,
       asn.assigned_at as DeployedAt,
+      COALESCE(asn.rebill_exempt, 0) as RebillExempt,
       COALESCE(a.purchase_cost, 0) as PurchaseCost
     FROM assignments asn
     JOIN assets a ON a.id = asn.asset_id
@@ -218,9 +225,19 @@ exportsRouter.get('/monthly-rebill-detail.csv', asyncHandler(async (req, res) =>
     LEFT JOIN locations l ON l.id = a.location_id
     LEFT JOIN users u ON u.id = asn.user_id
     WHERE strftime('%Y-%m', asn.assigned_at) = ?
-      AND COALESCE(asn.rebill_exempt, 0) = 0
+      AND a.status = 'deployed'
     ORDER BY Location, asn.assigned_at, a.asset_tag
   `).all(baseline, month) : [];
+
+  // One billable line per asset: collapse duplicate in-month assignment rows, and
+  // exclude any asset that has an exempt row (it shouldn't appear in the CSV at all).
+  const exemptAssets = new Set(rawLineItems.filter((r) => r.RebillExempt).map((r) => r.AssetId));
+  const seenAssets = new Set();
+  const lineItems = rawLineItems.filter((r) => {
+    if (exemptAssets.has(r.AssetId) || seenAssets.has(r.AssetId)) return false;
+    seenAssets.add(r.AssetId);
+    return true;
+  });
 
   const credits = db.prepare(`
     SELECT COALESCE(l.name, '(Unassigned)') as Location,
